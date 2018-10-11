@@ -11,28 +11,21 @@ from beem.comment import Comment
 from beem.exceptions import AccountDoesNotExistsException, ContentDoesNotExistsException, VotingInvalidOnArchivedPost
 from beem.instance import set_shared_steem_instance
 from beem.nodelist import NodeList
-from beem.utils import construct_authorperm, reputation_to_score, addTzInfo
-from categories import CAT_DESCRIPTION, CATEGORIES
-from dateutil.parser import parse
+from beem.utils import construct_authorperm, addTzInfo
+import config
 from discord.ext.commands import Bot
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO,
+                    filename=datetime.datetime.utcnow().strftime('logs/steemflagrewards-%Y-%d-%m-%H-%M.txt'))
 
 db = sqlite3.connect('SFR.db')
 cursor = db.cursor()
-
-sfr_name = 'steemflagrewards'
 
 nodes = NodeList().get_nodes()
 stm = Steem(node=nodes)
 set_shared_steem_instance(stm)
 queueing = False
-queue_vp = 85
 
-STEEM_MIN_REPLY_INTERVAL = 3
-STEEM_MIN_VOTE_INTERVAL = 3
-POST_PROMOTION_CHANNEL_ID = "REPLACE WITH DISCORD CHANNEL ID"
-FLAG_APPROVAL_CHANNEL_ID = "REPLACE WITH DISCORD CHANNEL ID"
 
 ##################################################
 # Uncomment for the initial setup of the database
@@ -47,7 +40,7 @@ FLAG_APPROVAL_CHANNEL_ID = "REPLACE WITH DISCORD CHANNEL ID"
 def check_cat(comment):
     """Returning the matching category of abuse"""
     cats = []
-    for cat in CATEGORIES:
+    for cat in sorted(config.CAT_DESCRIPTION.keys()):
         if cat in comment.lower():
             if cat == 'spam' and 'comment spam' in comment.lower():
                 continue
@@ -61,7 +54,7 @@ def get_wait_time(account):
     """
     account.refresh()
     last_post_timedelta = addTzInfo(datetime.datetime.utcnow()) - account['last_post']
-    return max(0, STEEM_MIN_REPLY_INTERVAL - last_post_timedelta.total_seconds())
+    return max(0, config.STEEM_MIN_REPLY_INTERVAL - last_post_timedelta.total_seconds())
 
 
 def report():
@@ -70,8 +63,8 @@ def report():
     cursor.execute(
         'INSERT INTO flaggers SELECT DISTINCT flagger FROM steemflagrewards WHERE included == 0 ORDER BY created ASC LIMIT 8;')
     sql = cursor.execute(
-        'SELECT \'[Comment](https://steemit.com/\' || post || \'#\' || comment || \')\', \'@\' || flagger, \'$\' || ROUND(payout, 3), category' \
-		'FROM steemflagrewards WHERE included == 0 AND flagger IN flaggers;')
+        'SELECT \'[Comment](https://steemit.com/\' || post || \'#\' || comment || \')\', \'@\' || flagger, \'$\' || ROUND(payout, 3), category'
+        'FROM steemflagrewards WHERE included == 0 AND flagger IN flaggers;')
     db.commit()
     table = '|Link|Flagger|Removed Rewards|Category|\n|:----|:-------|:---------------:|:--------|'
     for q in sql.fetchall():
@@ -90,7 +83,7 @@ def report():
         BY flagger;''')
     # Exchange 100 in line 99 with the percentage of the post rewards you want the flaggers to receive
     for q in sql.fetchall():
-        benlist.append({'account': q[0], 'weight': int(q[1])*10})
+        benlist.append({'account': q[0], 'weight': int(q[1]) * 10})
     rep = stm.post(
         'Steem Flag Rewards Report - 8 Flagger Post - {}'.format(datetime.datetime.now().strftime("%Y-%m-%d %H:%M")),
         body, 'steemflagrewards', tags=['steemflagrewards', 'abuse', 'steem', 'steemit', 'flag'], beneficiaries=benlist,
@@ -120,8 +113,8 @@ async def queue_voting(ctx, sfr):
     """
     global queueing
     while queueing:
-        while sfr.vp < queue_vp:  # For not failing because of unexpected manual votes
-            await asyncio.sleep(sfr.get_recharge_timedelta(queue_vp).total_seconds())
+        while sfr.vp < config.QUEUE_VP:  # For not failing because of unexpected manual votes
+            await asyncio.sleep(sfr.get_recharge_timedelta(config.QUEUE_VP).total_seconds())
             sfr.refresh()
         next_queued = cursor.execute(
             'SELECT comment, flagger, category, weight, followon FROM steemflagrewards WHERE queue == 1 ORDER BY created ASC LIMIT 1;').fetchone()
@@ -130,22 +123,22 @@ async def queue_voting(ctx, sfr):
             await ctx.send('No more mentions left in the queue. Going back to instant voting mode.')
             return
         authorperm, flagger, cats, weight, follow_on = next_queued
-        comment = Comment(authorperm,steem_instance=stm)
-        #gets post created date without timezone info for comparing to now
+        comment = Comment(authorperm, steem_instance=stm)
+        # gets post created date without timezone info for comparing to now
         created = comment['created'].replace(tzinfo=None)
-        now=datetime.datetime.utcnow().replace(microsecond=0)
+        now = datetime.datetime.utcnow().replace(microsecond=0)
         dif = now - created
         ts = round(dif.total_seconds())
-        difmin=round((ts/60))
-        if(difmin < 15):
-             await asyncio.sleep(ts)
+        difmin = round((ts / 60))
+        if (difmin < 15):
+            await asyncio.sleep(ts)
         try:
             comment.upvote(weight, sfr.name)
-            await asyncio.sleep(STEEM_MIN_VOTE_INTERVAL) # sleeps to account for STEEM_MIN_VOTE_INTERVAL
+            await asyncio.sleep(config.STEEM_MIN_VOTE_INTERVAL)  # sleeps to account for STEEM_MIN_VOTE_INTERVAL
         except VotingInvalidOnArchivedPost:
             await ctx.send(
                 'Sadly one comment had to be skipped because it got too old.' \
-				'Maybe the author can delete the comment and write a new one?')
+                'Maybe the author can delete the comment and write a new one?')
             cursor.execute('UPDATE steemflagrewards SET queue = 0 WHERE comment == ?', (authorperm,))
             db.commit()
             continue
@@ -153,10 +146,10 @@ async def queue_voting(ctx, sfr):
         if not follow_on:
             cat_string = ''
             for i in cats.split(', '):
-                cat_string += CAT_DESCRIPTION[i]
+                cat_string += config.CAT_DESCRIPTION[i]
             body = 'Steem Flag Rewards mention comment has been approved! Thank you for reporting' \
-			       'this abuse, @{}. {} This post was submitted via our Discord Community channel.' \
-				   'Check us out on the following link!\n[SFR Discord](https://discord.gg/7pqKmg5)'.format(
+                   'this abuse, @{}. {} This post was submitted via our Discord Community channel.' \
+                   'Check us out on the following link!\n[SFR Discord](https://discord.gg/7pqKmg5)'.format(
                 flagger, cat_string)
             await asyncio.sleep(get_wait_time(sfr))
             stm.post('', body,
@@ -179,18 +172,18 @@ async def approve(ctx, link):
     """Checks post body for @steemflagrewards mention and https://steemit.com/ and must be in the flag_comment_review
     channel id """
     global queueing
-    if ctx.message.channel.id != FLAG_APPROVAL_CHANNEL_ID:
+    if ctx.message.channel.id != config.FLAG_APPROVAL_CHANNEL_ID:
         await ctx.send('Send commands in the right channel please.')
         return
     logging.info('Registered command for {} by {}'.format(link, ctx.message.author.name))
     comment_perm = link.split('@')[-1]
     try:
-        flaggers_comment = Comment(comment_perm,steem_instance=stm)
+        flaggers_comment = Comment(comment_perm, steem_instance=stm)
     except ContentDoesNotExistsException:
         await ctx.send('Please look at your link again. Could not find the linked comment.')
         return
     flagger = Account(flaggers_comment['author'])
-    sfr = Account(sfr_name,steem_instance=stm)
+    sfr = Account(config.SFR_NAME, steem_instance=stm)
     if '@steemflagrewards' not in flaggers_comment['body']:
         await ctx.send('Could not find a @steemflagrewards mention. Please check the comment.')
         return
@@ -199,19 +192,22 @@ async def approve(ctx, link):
         await ctx.send('No abuse category found.')
         return
     await ctx.send('Abuse category acknowledged as {}'.format(', '.join(cats)))
-    flagged_post = Comment('{}/{}'.format(flaggers_comment['parent_author'], flaggers_comment['parent_permlink']),steem_instance=stm)
+    flagged_post = Comment('{}/{}'.format(flaggers_comment['parent_author'], flaggers_comment['parent_permlink']),
+                           steem_instance=stm)
     cursor.execute('SELECT * FROM steemflagrewards WHERE comment == ?', (flagged_post.authorperm,))
-    if flagged_post['author'] == sfr_name:  # Check if flag is a follow on flag
+    if flagged_post['author'] == config.SFR_NAME:  # Check if flag is a follow on flag
         for i in range(2):
-            flagged_post = Comment('{}/{}'.format(flagged_post['parent_author'], flagged_post['parent_permlink']),steem_instance=stm)
+            flagged_post = Comment('{}/{}'.format(flagged_post['parent_author'], flagged_post['parent_permlink']),
+                                   steem_instance=stm)
         follow_on = True
         await ctx.send('Follow on flag spotted')
     elif cursor.fetchone():
         follow_on = True
         while True:
-            flaggers_comment = Comment(flaggers_comment['parent_author']+'/'+ flaggers_comment['parent_permlink'],steem_instance=stm)
+            flagged_post = Comment(flagged_post['parent_author'] + '/' + flagged_post['parent_permlink'],
+                                       steem_instance=stm)
             if cursor.execute('SELECT * FROM steemflagrewards WHERE post == ?',
-                              (flaggers_comment.permlink,)).fetchall():
+                              (flagged_post.permlink,)).fetchall():
                 break
     else:
         follow_on = False
@@ -227,25 +223,21 @@ async def approve(ctx, link):
             await ctx.send('Downvote confirmed')
             sfrdvote = v
 
-            follow_on_ROI = 0.1
-            new_flag_ROI = 0.2
-            first_flag_ROI = 0.25
-            ROI = 1.05
-
+            comment_ROI = config.ROI
             if follow_on is True:
-                ROI += follow_on_ROI
+                comment_ROI += config.FOLLOW_ON_ROI
             elif follow_on is False:
-                ROI += new_flag_ROI
+                comment_ROI += config.NEW_FLAG_ROI
             else:
                 await ctx.send('Something went very wrong. I\'m sorry about the inconvenience.')
             if not cursor.execute('SELECT flagger FROM steemflagrewards WHERE flagger == ?;', (flagger.name,)):
-                ROI += first_flag_ROI
+                comment_ROI += config.FIRST_FLAG_ROI
 
             if queueing:
-                voting_power = queue_vp * 100
+                voting_power = config.QUEUE_VP * 100
             else:
                 voting_power = sfr.vp * 100
-            vote_pct = stm.rshares_to_vote_pct(int(abs(int(v['rshares'])) * ROI),  # ROI for the flaggers
+            vote_pct = stm.rshares_to_vote_pct(int(abs(int(v['rshares'])) * comment_ROI),  # ROI for the flaggers
                                                steem_power=sfr.sp,
                                                voting_power=voting_power)
             min_vote_pct = stm.rshares_to_vote_pct(0.0245 / stm.get_sbd_per_rshares(),
@@ -261,18 +253,18 @@ async def approve(ctx, link):
     if not queueing:
         logging.info('Attempting to vote now.')
         created = flaggers_comment['created'].replace(tzinfo=None)
-        now=datetime.datetime.utcnow().replace(microsecond=0)
+        now = datetime.datetime.utcnow().replace(microsecond=0)
         dif = now - created
         ts = round(dif.total_seconds())
-        difmin=round((ts/60))
-        if(difmin < 15):
-             await asyncio.sleep(ts)
+        difmin = round((ts / 60))
+        if (difmin < 15):
+            await asyncio.sleep(ts)
         flaggers_comment.upvote(weight=weight, voter=sfr.name)
         await ctx.send('Upvoted.')
         if not follow_on:
             cat_string = ''
             for i in cats:
-                cat_string += CAT_DESCRIPTION[i]
+                cat_string += config.CAT_DESCRIPTION[i]
             body = 'Steem Flag Rewards mention comment has been approved! Thank you for reporting this abuse, @{}. {} This post was submitted via our Discord Community channel. Check us out on the following link!\n[SFR Discord](https://discord.gg/7pqKmg5)'.format(
                 flaggers_comment['author'], cat_string)
             await asyncio.sleep(get_wait_time(sfr))
@@ -298,11 +290,11 @@ async def approve(ctx, link):
         msg = 'Sucessfully posted a new report! Check it out! (And upvote it as well :P)\nhttps://steemit.com/{}'.format(
             r)
         await ctx.send(msg)
-        postpromo = bot.get_channel(POST_PROMOTION_CHANNEL_ID)
+        postpromo = bot.get_channel(config.POST_PROMOTION_CHANNEL_ID)
         await postpromo.send(msg)
         sfr.claim_reward_balance()
     sfr.refresh()
-    if sfr.vp < queue_vp and not queueing:
+    if sfr.vp < config.QUEUE_VP and not queueing:
         await ctx.send(
             'Hey my mojo is getting low. I should take a break...\nThat\'s why I\'ll go into queue mode now.'.format(
                 str(round(sfr.get_voting_value_SBD(), 3))))
@@ -313,25 +305,32 @@ async def approve(ctx, link):
 @bot.command()
 async def queue(ctx):
     queue = cursor.execute(
-        'SELECT comment, post FROM steemflagrewards WHERE queue == 1 ORDER BY created ASC;').fetchall()
+        'SELECT DISTINCT comment, post FROM steemflagrewards WHERE queue == 1 ORDER BY created ASC;').fetchall()
     if not queue:
         await ctx.send('No mention in the queue')
         return
-    sfr = Account(sfr_name,steem_instance=stm)
+    sfr = Account(config.SFR_NAME, steem_instance=stm)
+    embeds = []
     queue_embed = discord.Embed(title='@steemflagrewards voting queue',
-                                description=f'Next vote will happen in {sfr.get_recharge_timedelta(queue_vp) // 60}.',
+                                description=f'Next vote will happen in {sfr.get_recharge_time_str(config.QUEUE_VP)}.',
                                 color=discord.Color.red())
-    for mention in queue:
-        queue_embed.add_field(name=f'Number {queue.index(mention) + 1} in the queue',
-                              value=f'[{mention[0]}](https://steemit.com/{mention[1]}/#{mention[0]})')
-    await ctx.send(embed=queue_embed)
+    queue_embed.add_field(name='Voting Mana', value=round(sfr.vp, 2))
+    embeds.append(queue_embed)
+    for cnt, mention in enumerate(queue):
+        embeds.append(discord.Embed(title=f'Number {cnt+1} in the queue',
+                                    description=f'[{mention[0]}](https://steemit.com/{mention[1]}/#{mention[0]})'))
+    for e in embeds:
+        await ctx.send(embed=e)
+
 
 @bot.command()
 async def clear_queue(ctx):
-    cursor.execute('UPDATE steemflagrewards SET queue = 0 WHERE queue == 1')
+    """Removes all queued mentions"""
+    cursor.execute('DELETE FROM steemflagrewards WHERE queue == 1')
     db.commit()
     await ctx.send('Queue has been successfully cleared!')
     return
+
 
 @bot.command()
 async def sdl(ctx, cmd: str, *mode: str):
@@ -339,10 +338,8 @@ async def sdl(ctx, cmd: str, *mode: str):
     Manage the list of the steemit defence league accounts with this command. Use it with ?sdl and one of the following
     """
     logging.info(f'{ctx.author.name} send sdl command with {cmd} ... {mode}')
-    permitted = [999999999999999999,  # Sample Discord ID
-                 ]  # A list of users who are allowed to edit the list.
     if cmd == 'add':
-        if ctx.author.id not in permitted:
+        if ctx.author.id not in config.PERMITTED:
             await ctx.send('You do not have permissions to edit the SDL list.')
             return
         if not mode:
@@ -367,7 +364,7 @@ async def sdl(ctx, cmd: str, *mode: str):
             await ctx.send(f'Added @{acc.name} to the list.')
         db.commit()
     elif cmd == 'remove':
-        if ctx.author.id not in permitted:
+        if ctx.author.id not in config.PERMITTED:
             await ctx.send('You do not have permissions to edit the SDL list.')
             return
         if not mode:
@@ -388,13 +385,14 @@ async def sdl(ctx, cmd: str, *mode: str):
         elif 'steemit' in mode:
             link = '[{0}](https://steemit.com/@{0})\n'
         else:
-            msg = '\n**Accounts with delegations**\n```\n'
+            await ctx.send('**Accounts with delegations**')
+            second_step = False
             names = cursor.execute('SELECT * FROM sdl ORDER BY delegation DESC, name ASC;').fetchall()
             for n in names:
-                if n[2] == 0 and '**Accounts without delegations**' not in msg:
-                    msg += '```\n**Accounts without delegations**\n```\n'
-                msg += f'{n[0]}\n'
-            await ctx.send(msg + '```')
+                if n[2] == 0 and  not second_step:
+                    await ctx.send('**Accounts without delegations**')
+                    second_step = True
+                await ctx.send(f'`{n[0]}`')
             return
         delegated = discord.Embed(title='SDL with delegation',
                                   description='A list of Steemit Defence League accounts with a delegation (potentially by @steem)',
@@ -439,7 +437,7 @@ async def status(ctx):
     logging.info('Registered status command')
     embed = discord.Embed(title='SFR Status', description='The current status of the SFR bot and account.',
                           color=discord.Color.blue())
-    sfr = Account(sfr_name,steem_instance=stm)
+    sfr = Account(config.SFR_NAME, steem_instance=stm)
     embed.add_field(name='Bot', value='Up and running', inline=False)
     embed.add_field(name='Flaggers', value='{}/9'.format(cursor.execute(
         'SELECT COUNT(DISTINCT flagger) FROM steemflagrewards WHERE included == 0;').fetchone()[0]), inline=False)
@@ -453,8 +451,8 @@ async def status(ctx):
     embed.add_field(name='Voting Mana', value=round(sfr.vp, 2), inline=False)
     embed.add_field(name='VP --> 100%', value=sfr.get_recharge_time_str(100), inline=False)
     embed.add_field(name='Vote Value', value=round(sfr.get_voting_value_SBD(), 3), inline=False)
-    embed.add_field(name='Reputation', value=round(sfr.get_reputation() , 3), inline=False)
-    embed.add_field(name='Resource Credit %', value=round(sfr.get_rc_manabar()['current_pct'] , 1), inline=False)
+    embed.add_field(name='Reputation', value=round(sfr.get_reputation(), 3), inline=False)
+    embed.add_field(name='Resource Credit %', value=round(sfr.get_rc_manabar()['current_pct'], 1), inline=False)
     post = sfr.get_blog()[0]
     embed.add_field(name='Latest Post',
                     value='[{}](https://steemit.com/@{}/{})'.format(post['title'], post['author'], post['permlink']),
@@ -467,27 +465,32 @@ async def status(ctx):
 async def updatenodes(ctx):
     """Updates the nodes using the built in function that is based on hourly run benchmarks. Thanks holger80 for that feature."""
     global stm
-    NodeList().update_nodes(steem_instance=stm)
+    n = NodeList()
+    n.update_nodes(steem_instance=stm)
+    stm = Steem(
+        node=n.get_nodes()
+    )
     await ctx.send('Updated nodes using @fullnodeupdate.')
 
 
 @bot.event
 async def on_ready():
     global queueing
-    sfr = Account(sfr_name,steem_instance=stm)
+    sfr = Account(config.SFR_NAME, steem_instance=stm)
     queue_length = cursor.execute('SELECT count(*) FROM steemflagrewards WHERE queue == 1;').fetchone()
-    if sfr.vp < queue_vp or queue_length[0] > 0:
+    if sfr.vp < config.QUEUE_VP or queue_length[0] > 0:
         flag_comment_review = bot.get_channel(
-            FLAG_APPROVAL_CHANNEL_ID)
+            config.FLAG_APPROVAL_CHANNEL_ID)
         await flag_comment_review.send(
-            f'Either the VP is below {queue_vp} or there are unvoted queued mentions. Going into queue mode.')
+            f'Either the VP is below {config.QUEUE_VP} or there are unvoted queued mentions. Going into queue mode.')
         queueing = True
         await queue_voting(flag_comment_review, sfr)
 
 
 def main():
-    stm.wallet.unlock(os.getenv('PASSPHRASE'))
-    bot.run(os.getenv('TOKEN'))
+    stm.wallet.unlock(config.WALLET_KEY)
+    bot.run(config.TOKEN)
+
 
 if __name__ == '__main__':
     main()
