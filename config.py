@@ -52,12 +52,10 @@ PERMITTED = [405584423950614529,  # Iamstan
              ]
 
 # Local Wallet passphrase
-# WALLET_KEY = os.getenv('PASSPHRASE')
-WALLET_KEY = 'PASSPHRASE'
+WALLET_KEY = os.getenv('PASSPHRASE')
 
 # Discord Bot Token
-# TOKEN = os.getenv('TOKEN')
-TOKEN = 'TOKEN'
+TOKEN = os.getenv('TOKEN')
 
 # Base ROI for all flags (1.05 --> 5% base ROI)
 ROI = 1.05
